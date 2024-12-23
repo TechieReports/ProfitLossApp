@@ -123,4 +123,3 @@ if spend_files and revenue_files:
             file_name="Filtered_Data.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-s
