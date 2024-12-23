@@ -4,10 +4,11 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils.dataframe import dataframe_to_rows
 from io import BytesIO
+import datetime
 
-def process_spend_and_revenue(spend_file, revenue_file, filters):
-    spends_df = pd.read_excel(spend_file)
-    revenue_raw_df = pd.read_csv(revenue_file)
+def process_spend_and_revenue(spend_files, revenue_files, filters):
+    spends_df = pd.concat([pd.read_excel(file) for file in spend_files])
+    revenue_raw_df = pd.concat([pd.read_csv(file) for file in revenue_files])
 
     # Aggregate raw revenue data
     revenue_agg = revenue_raw_df.groupby(['campid', 'date'], as_index=False).agg({
@@ -45,10 +46,6 @@ def process_spend_and_revenue(spend_file, revenue_file, filters):
         merged_data = merged_data[merged_data['Date'] <= filters['end_date']]
     if filters['campaign_ids']:
         merged_data = merged_data[merged_data['Camp ID'].isin(filters['campaign_ids'])]
-    if filters['profit_loss_min'] is not None:
-        merged_data = merged_data[merged_data['Profit/Loss'] >= filters['profit_loss_min']]
-    if filters['profit_loss_max'] is not None:
-        merged_data = merged_data[merged_data['Profit/Loss'] <= filters['profit_loss_max']]
 
     # Sort by Date (oldest to newest) and Camp ID (smallest to largest)
     merged_data.sort_values(by=['Date', 'Camp ID'], inplace=True)
@@ -57,85 +54,73 @@ def process_spend_and_revenue(spend_file, revenue_file, filters):
     column_order = ['Camp ID', 'Ad set name', 'Date', 'Amount spent (USD)', 'Revenue', 'CPR', 'RPC', 'Profit/Loss']
     merged_data = merged_data[column_order]
 
-    # Create Excel file in memory
-    output = BytesIO()
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Profit Loss Analysis"
+    # Aggregate data for top and bottom-performing campaigns
+    aggregated_data = merged_data.groupby('Camp ID', as_index=False).agg({
+        'Amount spent (USD)': 'sum',
+        'Revenue': 'sum',
+        'Profit/Loss': 'sum'
+    })
+    top_5_campaigns = aggregated_data.sort_values(by='Profit/Loss', ascending=False).head(5)
+    bottom_5_campaigns = aggregated_data.sort_values(by='Profit/Loss', ascending=True).head(5)
 
-    # Add headers with formatting
-    headers = ['Camp ID', 'Campaign Name', 'Date', 'Spend', 'Revenue', 'CPR', 'RPC', 'Profit/Loss']
-    header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-    header_font = Font(bold=True)
-
-    for col, header in enumerate(headers, start=1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.fill = header_fill
-        cell.font = header_font
-
-    # Freeze header row
-    ws.freeze_panes = ws['A2']
-
-    # Add data rows and format the date column
-    for row_idx, row in enumerate(dataframe_to_rows(merged_data, index=False, header=False), start=2):
-        for col_idx, value in enumerate(row, start=1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            # Format Date column to "MMM DD"
-            if col_idx == 3:  # Date is the 3rd column
-                cell.number_format = "MMM DD"
-
-    # Adjust column widths
-    for col in ws.columns:
-        max_length = max(len(str(cell.value)) for cell in col if cell.value is not None)
-        adjusted_width = max_length + 2
-        ws.column_dimensions[col[0].column_letter].width = adjusted_width
-
-    # Conditional formatting for Profit/Loss
-    profit_loss_col_index = headers.index('Profit/Loss') + 1
-    for row in ws.iter_rows(min_row=2, min_col=profit_loss_col_index, max_col=profit_loss_col_index):
-        for cell in row:
-            if cell.value is not None:
-                if cell.value > 0:
-                    cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-                elif cell.value < 0:
-                    cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-
-    wb.save(output)
-    output.seek(0)
-    return output
+    return merged_data, top_5_campaigns, bottom_5_campaigns
 
 # Streamlit UI
-st.title("Profit/Loss Analysis Tool")
+st.title("Profit/Loss Analysis Tool with Enhanced Filters")
 st.write("Upload Spend and Raw Revenue Files to Generate a Profit/Loss Report.")
 
-spend_file = st.file_uploader("Upload Spend File (Excel)", type=["xlsx"])
-revenue_file = st.file_uploader("Upload Raw Revenue File (CSV)", type=["csv"])
+spend_files = st.file_uploader("Upload Spend Files (Excel)", type=["xlsx"], accept_multiple_files=True)
+revenue_files = st.file_uploader("Upload Revenue Files (CSV)", type=["csv"], accept_multiple_files=True)
 
-if spend_file and revenue_file:
+if spend_files and revenue_files:
     st.write("Filters:")
-    start_date = st.date_input("Start Date", value=None)
-    end_date = st.date_input("End Date", value=None)
-    campaign_ids = st.text_input("Filter by Campaign IDs (comma-separated):")
-    profit_loss_min = st.number_input("Minimum Profit/Loss", value=None)
-    profit_loss_max = st.number_input("Maximum Profit/Loss", value=None)
 
-    # Parse Campaign IDs
-    campaign_ids = [int(c.strip()) for c in campaign_ids.split(",") if c.strip().isdigit()]
+    # Load the data to populate filter options
+    spends_df = pd.concat([pd.read_excel(file) for file in spend_files])
+    spends_df['Camp ID'] = spends_df['Ad set name'].str.extract(r'\((\d+)\)').astype(int)
+    campaigns = spends_df['Camp ID'].unique()
+
+    # Date range filter with default values
+    default_start_date = datetime.date.today() - datetime.timedelta(days=30)
+    default_end_date = datetime.date.today()
+
+    start_date, end_date = st.date_input(
+        "Select Date Range",
+        value=(default_start_date, default_end_date)
+    )
+
+    # Campaign filter
+    selected_campaigns = st.multiselect("Select Campaigns", options=campaigns)
 
     filters = {
         'start_date': pd.to_datetime(start_date) if start_date else None,
         'end_date': pd.to_datetime(end_date) if end_date else None,
-        'campaign_ids': campaign_ids,
-        'profit_loss_min': profit_loss_min,
-        'profit_loss_max': profit_loss_max
+        'campaign_ids': selected_campaigns
     }
 
     if st.button("Process"):
-        output_file = process_spend_and_revenue(spend_file, revenue_file, filters)
-        st.success("Processing complete!")
+        filtered_data, top_5_campaigns, bottom_5_campaigns = process_spend_and_revenue(spend_files, revenue_files, filters)
+
+        # Display filtered data
+        st.subheader("Filtered Data")
+        st.dataframe(filtered_data)
+
+        # Display top 5 campaigns
+        st.subheader("Top 5 Performing Campaigns")
+        st.dataframe(top_5_campaigns)
+
+        # Display bottom 5 campaigns
+        st.subheader("Bottom 5 Performing Campaigns")
+        st.dataframe(bottom_5_campaigns)
+
+        # Download filtered data
+        output = BytesIO()
+        filtered_data.to_excel(output, index=False, engine='openpyxl')
+        output.seek(0)
         st.download_button(
-            label="Download Profit/Loss Report",
-            data=output_file,
-            file_name="Profit_Loss_Analysis.xlsx",
+            label="Download Filtered Data",
+            data=output,
+            file_name="Filtered_Data.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+s
